@@ -1,0 +1,286 @@
+---
+task_name: dsd100_multisource_separation_multi_loss
+description: Music source separation on 4 sources dataset with multi-source output using multiple loss functions (MR-STFT + SI-SNR + L1)
+
+# test config
+test_only: False
+test_ckpt_path: null
+
+# Fine-tuning: set finetune_wandb_id to load last.ckpt from a previous run and start a new wandb run
+# Example: finetune_wandb_id: "abc123xyz"
+finetune_wandb_id: null
+finetune_config_filename: "roformer_4s-dataset_fine-tuning"
+
+test_model: True
+
+map_4stem_to_9stem: True
+init_new_stems_from_other: False
+add_noise_to_new_stems: False
+
+# Dataset paths (can be overridden by MUSICA cluster detection)
+dataset_path_4_sources: "/opt/datasets/HF_datasets/saved/mss4s_combined"
+dataset_path_8_sources: "/opt/datasets/HF_datasets/saved/mss8s_other_is_present"
+dataset_path_msr_bench: "/opt/datasets/HF_datasets/saved/msr_bench"
+
+# training config
+deterministic: True
+manual_seed: 42
+
+datamodule:
+    module: src.datamodules.datamodule
+    main: DataModule
+    args:
+        train_dataloader:
+            batch_size: 2
+            num_workers: 0
+            persistent_workers: false
+            shuffle: false
+            pin_memory: false
+            dataset:
+                module: src.data.dataset_8s
+                main: MultiAudioRandomSegmentDataset
+                args:
+                    split: train
+#                    columns: ["guitars", "bass", "drums", "vocals", "keyboards", "synthesizers", "percussions", "orchestral", "other"]
+                    columns: ["vocals", "bass", "drums", "guitars", "keyboards", "synthesizers", "percussions", "orchestral", "other"]
+                    duration_columns: "duration_seconds"
+                    presence_suffix: "_is_present"
+                    sr: 48000
+                    mono: false
+                    segment_seconds: 10.0
+                    seed: 1234
+                    resample_each_epoch: true
+                    mix_probability_start: 1.0
+                    mix_probability_end: 1.0
+                    require_band_stems: false
+        val_dataloader:
+            batch_size: 2
+            num_workers: 0
+            persistent_workers: false
+            shuffle: false
+            pin_memory: false
+            dataset:
+                module: src.data.dataset_8s
+                main: MultiAudioRandomSegmentDataset
+                args:
+                    split: test
+                    columns: ["vocals", "bass", "drums", "guitars", "keyboards", "synthesizers", "percussions", "orchestral", "other"]
+                    duration_columns: "duration_seconds"
+                    presence_suffix: "_is_present"
+                    sr: 48000
+                    mono: false
+                    segment_seconds: 10.0
+                    seed: 1234
+                    resample_each_epoch: false  # Keep validation consistent
+        test_dataloader:
+            batch_size: 1  # Use batch_size=1 for full songs (can be large)
+            num_workers: 0
+            persistent_workers: false
+            shuffle: false
+            pin_memory: false
+            dataset:
+                module: src.data.dataset_8s
+                main: MultiAudioFullSongDataset
+                args:
+                    split: test
+                    columns: ["vocals", "bass", "drums", "guitars", "keyboards", "synthesizers", "percussions", "orchestral", "other"]
+                    presence_suffix: "_is_present"
+                    sr: 48000
+                    mono: false
+
+lightning_module:
+    module: src.training.lightningmodule.multisource_separation
+    main: MultiSourceSeparationLightning
+    args:
+        n_sources: 9  # vocals, bass, drums, guitars, keyboards, synthesizers, percussions, orchestral elements, others
+        augment: true
+        target_key: "aug_waveform"
+        debug: false
+        use_film_conditioning: false  # Set to true to enable FiLM with LABELS (default: false)
+        use_fad_clap: false  # Enable FAD-CLAP evaluation during training/validation
+        fad_clap_batch_size: 2  # Batch size for FAD-CLAP embedding calculation (reduced for stability)
+        fad_clap_max_samples: 50  # Maximum samples per epoch for FAD-CLAP (reduced to avoid memory issues)
+        fad_clap_force_cpu: true  # Force CPU usage to avoid CUDA compatibility issues
+        use_si_snr: true  # Enable SI-SNR evaluation during training/validation
+        sampling_rate: 48000
+        use_multi_mel_snr: true
+        resample_to_44100_for_model: true
+        columns: ["vocals", "bass", "drums", "guitars", "keyboards", "synthesizers", "percussions", "orchestral", "other"]
+        progress_bar_metrics: ["step_train/loss", "epoch_train/loss", "epoch_train/si_snr_loss", "epoch_train/l1_loss", "epoch_train/mr_stft_loss"]  # Uncomment to show only specific metrics in progress bar
+        # progress_bar_metrics: []  # Uncomment to show no metrics in progress bar (all still logged)
+        # progress_bar_metrics: null  # Default: show all metrics in progress bar
+        use_ema: true  # Enable Exponential Moving Average for better model stability
+        ema_decay: 0.999  # EMA decay rate (typically 0.999 or 0.9999)
+        test_chunk_overlap: 0.0
+        msr_bench_validation: False
+        msr_bench_max_files: 100
+        model:
+            module: src.models.bs_roformer.roformer_wrapper
+            main: RoformerWrapper
+            args:
+                dim: 384  # 384  # 512
+                head_dim: 64
+                heads: 8
+                depth: 8  # 12
+                time_transformer_depth: 1
+                freq_transformer_depth: 1
+                stereo: true
+                num_stems: 9
+                num_residual_streams: 1
+                # dim_freqs_in: 1115  # (n_fft // 2) + 1 = (2229 // 2) + 1 = 1115
+                stft_n_fft: 2048  # Matches frequency resolution of pretrained model (21.534 Hz/bin at 48kHz ≈ 21.533 Hz/bin at 44.1kHz with n_fft=2048)
+                stft_win_length: 2048  # Match n_fft for best reconstruction
+                stft_hop_length: 441  # 10ms at 44.1kHz
+                freqs_per_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 129 ]  # First 62 bands (1025 bins) match pretrained, last 3 bands (91 bins) are new for 22.05-24kHz range
+                freqs_per_bands_with_extra_bands: [ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 12, 12, 12, 12, 12, 12, 12, 12, 24, 24, 24, 24, 24, 24, 24, 24, 48, 48, 48, 48, 48, 48, 48, 48, 128, 129, 48, 24, 19 ]  # First 62 bands (1025 bins) match pretrained, last 3 bands (91 bins) are new for 22.05-24kHz range
+                mlp_expansion_factor: 2  # Reduced from 4 for memory optimization
+                use_mel_band_roformer: false
+                # If set to true, uses only first 1025 bins (pretrained range) without extra frequency bands
+                # Still uses 48kHz and n_fft=2229, but limits processing to bins 0-1024
+                time_domain_extra_merge: false
+                use_dual_stft: false
+                sr_48k: 48000  # Sample rate for 48kHz STFT (full range)
+                n_fft_48k: 2229  # n_fft for 48kHz STFT (full range)
+                hop_length_48k: 480  # Hop length for 48kHz STFT (full range)
+                win_length_48k: 2229  # Window length for 48kHz STFT (full range)
+                load_pretrained: true  # Will load weights for first 62 bands, initialize last 3 bands from scratch
+                phased_fine_tuning: false  # Enable phased fine-tuning: Phase 1 (lower-freq only) then Phase 2 (full range)
+                phased_fine_tuning_phase1_epochs: 30  # Number of epochs for Phase 1 (10-20% of total epochs, e.g., 20/200 = 10%)
+                phased_fine_tuning_crossover_bin: 1025  # Bin index where pretrained frequencies end (bins 0-1024 = 0-22.05kHz)
+                lora_config:
+                    enabled: true  # Set to true to enable LoRA fine-tuning
+                    finetune_lora: true  # If true, LoRA parameters are trainable. If false, LoRA parameters are frozen.
+                    finetune_bandsplit: false  # If true, BandSplit module parameters are trainable.
+                    finetune_mask_estimator: false  # If true, mask estimator parameters are trainable. If false, all mask estimators are frozen.
+                    finetune_only_new_mask_estimators: true  # If true (default), only NEW mask estimators (indices 3-7) are fine-tuned when finetune_mask_estimator=true. If false, ALL mask estimators (both new and pretrained) are fine-tuned.
+                    r: 8  # LoRA rank
+                    lora_alpha: 16  # alpha / rank > 1
+                    lora_dropout: 0.05
+                    merge_weights: false  # Whether to merge LoRA weights after training
+                    fan_in_fan_out: false  # Not used for RoFormer
+                    enable_lora: [true, false, true]  # Apply LoRA to [Q, K, V] in attention
+        loss:
+            module: src.training.loss.l1_mr_stft_si_snr_auto_scaled
+            main: get_loss_func
+            args:
+                l1_base_weight: 100.0      # Base weight for L1 scaling
+                l1_max_weight: 1000.0       # Maximum allowed L1 weight
+                si_snr_weight: 0.0      # Weight for SI-SNR loss, maybe 0.1 to 1.0
+                multi_mel_snr_weight: 0.0  # Weight for Multi-Mel-SNR loss (default: 0.0)
+                multi_mel_snr_sample_rate: 48000  # Sample rate for Multi-Mel-SNR computation
+                log_wmse_weight: 0.0  # Weight for LogWMSE loss (default: 0.0)
+                log_wmse_sample_rate: 48000  # Sample rate for LogWMSE computation
+                log_wmse_audio_length: 10.0  # Audio length in seconds for LogWMSE (matches segment_seconds)
+                low_amplitude_penalty_weight: 0.0
+                low_amplitude_ratio: 0.5
+                low_amplitude_target_floor: 1.0e-4
+                multi_stft_resolution_loss_weight: 1.0
+                multi_stft_resolutions_window_sizes: [ 4096, 2048, 1024, 512, 256 ]  # Can keep these for loss (they're independent of model STFT)
+                multi_stft_hop_size: 147  # 160= ~3.33ms at 48kHz (maintains same temporal resolution as 147 at 44.1kHz)
+                multi_stft_normalized: false
+                multi_stft_n_fft: 2048  # Loss function STFT can differ from model STFT (kept at power of 2 for efficiency)
+                phased_fine_tuning_crossover_bin: 1025  # Bin index to mask frequencies >= this during Phase 1 (same as model's crossover)
+        optimizer:
+            module: torch.optim
+            main: AdamW
+            split_params: true
+            lr_mask_new: 3.0e-3
+            lr_mask_pretrained: 3e-3
+            lr_mask_pretrained_unlocked: 3.0e-3
+            unfreeze_mask_at_step: -1
+            args:
+                params: null  # assigned automatically
+                lr: 5.0e-3  # BS-Roformer paper: 5 × 10⁻⁴ (this was incorrectly 5e-3 before)
+                betas: [0.9, 0.999]
+                eps: 0.00000001
+                weight_decay: 0.0
+                amsgrad: true
+        lr_scheduler:
+            schedule_mode: 'step_lr'  # Use 'step_lr' for BS-Roformer style: reduces LR by gamma every step_size steps
+                                       # Options: 'cos' (cosine), 'linear', 'exp' (exponential), 'step_lr' (step-based), 'cyclic' (cyclic LR)
+            num_warmup_steps: 300
+            lr_end: 2.0e-5  # Not used for step_lr, but kept for compatibility
+            step_size: 300  # Reduce LR every 300 steps (3 epochs)
+            gamma: 0.9  # Multiply LR by 0.9 every step_size steps
+            interval: 'step'
+            frequency: 1
+#        lr_scheduler:
+#            schedule_mode: 'cyclic'  # Cyclic LR scheduler - cycles between base_lr and max_lr
+#            base_lr: 1.0e-5  # Minimum learning rate (if not specified, uses lr_end or max_lr/10)
+#            max_lr: 6.0e-3  # Maximum learning rate (if not specified, uses optimizer's initial lr)
+#            step_size_up: 90  # Number of steps in the increasing half of a cycle (default: 90 = ~15 epochs for 6 steps/epoch, gives ~4 cycles over 120 epochs)
+#            step_size_down: 90  # Number of steps in the decreasing half (defaults to step_size_up if not specified)
+#            mode: 'triangular'  # 'triangular', 'triangular2', or 'exp_range'
+#            cyclic_gamma: 1.0  # Scale factor for 'exp_range' mode (default: 1.0)
+#            scale_mode: 'cycle'  # 'cycle' or 'step' (default: 'cycle')
+#            lr_end: 2.0e-5  # Used as base_lr if base_lr is not specified
+#            interval: 'step'
+#            frequency: 1
+#        lr_scheduler:
+#            schedule_mode: 'cos'
+#            num_warmup_steps: 80  # 800 global steps = 200 epochs, 20 epochs = 80 steps
+#            lr_end: 2.0e-5
+#            interval: 'step'
+#            frequency: 1
+
+            # for cyclic LR-scheduler
+            base_lr: 1.0e-5  # Minimum learning rate (if not specified, uses lr_end or max_lr/10)
+            max_lr: 6.0e-3  # Maximum learning rate (if not specified, uses optimizer's initial lr)
+            step_size_up: 90  # Number of steps in the increasing half of a cycle (default: 90 = ~15 epochs for 6 steps/epoch, gives ~4 cycles over 120 epochs)
+            step_size_down: 90  # Number of steps in the decreasing half (defaults to step_size_up if not specified)
+            mode: 'triangular'  # 'triangular', 'triangular2', or 'exp_range'
+            cyclic_gamma: 1.0  # Scale factor for 'exp_range' mode (default: 1.0)
+            scale_mode: 'cycle'  # 'cycle' or 'step' (default: 'cycle')
+        is_validation: true
+        metric:
+            module: src.training.metrics.snr
+            main: get_metric_func
+
+train:
+    callbacks:
+        -
+            name: checkpoint
+            module: lightning.pytorch.callbacks
+            main: ModelCheckpoint
+            args:
+                every_n_epochs: 1
+                filename: "{epoch}"
+                save_top_k: 0  # Disable saving top-k checkpoints, only save last
+                save_last: True
+                verbose: False
+                dirpath: null  # Assigned in src.train
+        -
+            name: tqdm
+            module: lightning.pytorch.callbacks
+            main: TQDMProgressBar
+            args:
+                refresh_rate: 1
+    trainer:
+        module: lightning.pytorch
+        main: Trainer
+        compile: False
+        torch_flags: False
+        channels_last: False
+        args:
+            accelerator: auto
+            devices: auto
+            strategy: ddp_find_unused_parameters_true
+            num_nodes: 1
+            precision: 16-mixed
+            logger: null
+            fast_dev_run: False
+            max_epochs: 30
+            log_every_n_steps: 1
+            use_distributed_sampler: True
+            sync_batchnorm: True
+            check_val_every_n_epoch: 1
+            val_check_interval: 1.0
+            num_sanity_val_steps: 0
+            enable_checkpointing: True
+            enable_progress_bar: True
+            enable_model_summary: True
+            limit_train_batches: null
+            limit_val_batches: null
+            limit_test_batches: null
+            gradient_clip_val: 0.5
+            accumulate_grad_batches: 8
